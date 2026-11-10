@@ -4,7 +4,7 @@ import fitz
 import numpy as np
 import matplotlib.pyplot as plt
 
-def ParseTable(text):
+def parse_table(text):
     """Return an (n, 3) array of [x, Q3, q3] from one CILAS report page."""
     start = next(i for i, s in enumerate(text) if s.startswith("Standards classes")) + 1
     tokens = [t.strip() for t in text[start:]]
@@ -21,7 +21,16 @@ def ParseTable(text):
         i += 3
     return np.array(rows)
 
-def ReadData(file_in):
+def get_field(text, label):
+    """Return the float value following a header label, e.g. 'Diameter at 50%'."""
+    tokens = [t.strip() for t in text]
+    i = tokens.index(label)
+    for t in tokens[i + 1:i + 5]:          # value is within a few tokens of the label
+        if t.startswith(":"):
+            return float(t.lstrip(":").strip())
+    raise ValueError(f"No value found after '{label}'")
+
+def ReadData(file_in: str):
     doc = fitz.open(file_in)
     standard_class_headers = ['0.04', '0.07', '0.10', '0.20', '0.30', '0.40',
                               '0.50', '0.60', '0.70', '0.80', '0.90', '1.00',
@@ -44,14 +53,50 @@ def ReadData(file_in):
                               '2100.0', '2200.0', '2300.0', '2400.0', '2500.0']
     standard_class_headers_float = [float(val) for val in standard_class_headers]
     samples = []
-    for page_num in range(1, len(doc), 2):               # every second page; use range(1, 2, 2) for just page 1
+    for page_num in range(1, len(doc), 2):
         text = doc[page_num].get_text().splitlines()
+
         name = text[text.index("Sample Name") + 1].lstrip(": ").strip()
-        x, Q3, q3 = ParseTable(text).T
-        # sanity check against the known class boundaries
+        x, Q3, q3 = parse_table(text).T
         assert len(x) == 100 and np.allclose(x, standard_class_headers_float), \
                 f"Unexpected table on page {page_num}"
-        samples.append({"name": name, "x": x, "Q3": Q3, "q3": q3})
 
+        samples.append({
+        "name":   name,
+        "x":      x,
+        "Q3":     Q3,
+        "q3":     q3,
+        "mean":   get_field(text, "Mean diameter"),     # µm
+        "median": get_field(text, "Diameter at 50%"),   # µm
+        })
     return samples
 
+
+def Summarize(samples):
+    '''
+    Pull data from samples dict. average every two runs, for names, just take every other name
+    '''
+    names = np.array([sample['name'] for sample in samples[::2]])
+    q3 = np.array([np.mean([samples[i]['q3'], samples[i+1]['q3']], axis=0) for i in range(0, len(samples), 2)])
+    Q3 = np.array([np.mean([samples[i]['Q3'], samples[i+1]['Q3']], axis=0) for i in range(0, len(samples), 2)])
+    means = np.array([np.mean([samples[i]['mean'], samples[i+1]['mean']]) for i in range(0, len(samples), 2)])
+    meds = np.array([np.mean([samples[i]['median'], samples[i+1]['median']]) for i in range(0, len(samples), 2)])
+    
+    '''
+    Extract sample depths from names: List[str];
+    assuming form is {LocID}{Yr}-{core#}_{depth}-{depth+1cm} (e.g. AC19-01_100-101);
+    '''
+    depths = np.array([int(name.split('_')[1].split('-')[0]) for name in names])
+
+    # # Plot 1. Destribution functions with depth;
+    fig = plt.figure(figsize=(10,5))
+    for depth, data in zip(depths, q3):
+        plt.plot(-data + depth, '-k')
+    plt.title('Grain Size Distributions With Depth')
+    plt.xlabel('Grain Size [μm]')
+    plt.ylabel('Density Function + Core Depth [cm]')
+    plt.xscale('log')
+    plt.gca().invert_yaxis()
+    plt.show()
+    
+    return None
