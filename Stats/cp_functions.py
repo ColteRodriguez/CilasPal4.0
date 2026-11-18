@@ -70,33 +70,105 @@ def ReadData(file_in: str):
         "median": get_field(text, "Diameter at 50%"),   # µm
         })
     return samples
+    
+def USDAClasses(discrete_cdf_list, bins, clay_max=4, silt_max=63):
+    i_clay = np.argmin(np.abs(bins - clay_max))
+    i_silt = np.argmin(np.abs(bins - silt_max))
+
+    Q3_clay = discrete_cdf_list[:, i_clay]    # % finer than clay_max
+    Q3_silt = discrete_cdf_list[:, i_silt]    # % finer than silt_max
+
+    clay = Q3_clay
+    silt = Q3_silt - Q3_clay
+    sand = 100 - Q3_silt
+    return sand, silt, clay
+    
+def PhiPercentile(Q3, x, p):
+    d_um = np.array([10 ** np.interp(100 - p, cdf, np.log10(x)) for cdf in Q3])
+    return -np.log2(d_um / 1000)      # µm -> mm -> phi
+
+def Percentile(discrete_cdf, bins, perc):
+    for i, val in enumerate(discrete_cdf):
+        if val > perc:
+            slope = (discrete_cdf[i]-discrete_cdf[i-1])/(bins[i]-bins[i-1])
+            y_diff = perc - discrete_cdf[i-1]
+            return (y_diff/slope) + bins[i-1]
+
+def FolkWardStats(Q3, x):
+    phi = {p: PhiPercentile(Q3, x, p) for p in (5, 16, 25, 75, 84, 95)}
+    sorting = (phi[84] - phi[16]) / 4 + (phi[95] - phi[5]) / 6.6
+    kurtosis = (phi[95] - phi[5]) / (2.44 * (phi[75] - phi[25]))
+    return sorting, kurtosis
 
 
 def Summarize(samples):
-    '''
-    Pull data from samples dict. average every two runs, for names, just take every other name
-    '''
-    names = np.array([sample['name'] for sample in samples[::2]])
+    x = np.array(samples[0]['x'])
+    names = np.array([s['name'] for s in samples[::2]])
     q3 = np.array([np.mean([samples[i]['q3'], samples[i+1]['q3']], axis=0) for i in range(0, len(samples), 2)])
     Q3 = np.array([np.mean([samples[i]['Q3'], samples[i+1]['Q3']], axis=0) for i in range(0, len(samples), 2)])
     means = np.array([np.mean([samples[i]['mean'], samples[i+1]['mean']]) for i in range(0, len(samples), 2)])
-    meds = np.array([np.mean([samples[i]['median'], samples[i+1]['median']]) for i in range(0, len(samples), 2)])
-    
-    '''
-    Extract sample depths from names: List[str];
-    assuming form is {LocID}{Yr}-{core#}_{depth}-{depth+1cm} (e.g. AC19-01_100-101);
-    '''
-    depths = np.array([int(name.split('_')[1].split('-')[0]) for name in names])
+    d10 = np.array([Percentile(cdf, x, 10) for cdf in Q3])
+    d50 = np.array([Percentile(cdf, x, 50) for cdf in Q3])
+    d90 = np.array([Percentile(cdf, x, 90) for cdf in Q3])
+    sand, silt, clay = USDAClasses(Q3, x)
+    sorting, kurtosis = FolkWardStats(Q3, x)
 
-    # # Plot 1. Destribution functions with depth;
-    fig = plt.figure(figsize=(10,5))
+    depths = np.array([int(n.split('_')[1].split('-')[0]) for n in names])
+
+    # ---------- Plot 1: distributions with depth ----------
+    plt.figure(figsize=(4, 8))
     for depth, data in zip(depths, q3):
-        plt.plot(-data + depth, '-k')
+        plt.plot(x, -3 * data + depth, '-k')
     plt.title('Grain Size Distributions With Depth')
     plt.xlabel('Grain Size [μm]')
     plt.ylabel('Density Function + Core Depth [cm]')
     plt.xscale('log')
     plt.gca().invert_yaxis()
+
+    # ---------- Plot 2: composite profile ----------
+    fig, axs = plt.subplots(1, 4, figsize=(12, 10), sharey=True)
+
+    # (0) grain size statistics
+    axs[0].plot(means, depths, '-k', linewidth=1, label='Mean')
+    axs[0].plot(d10, depths, linewidth=1, label='D10')
+    axs[0].plot(d50, depths, linewidth=1, label='D50')
+    axs[0].plot(d90, depths, linewidth=1, label='D90')
+    axs[0].set_xscale('log')
+    axs[0].set_xlabel('Grain Size [μm]')
+    axs[0].set_ylabel('Core Depth [cm]')
+    axs[0].legend()
+    axs[0].grid(alpha=0.4)
+
+    # (1) sand / silt / clay
+    sand_top = sand
+    silt_top = sand + silt
+    clay_top = sand + silt + clay
+    axs[1].fill_betweenx(depths, 0,        sand_top, color='#e0b25c', label='Sand')
+    axs[1].fill_betweenx(depths, sand_top, silt_top, color='#9aa7b0', label='Silt')
+    axs[1].fill_betweenx(depths, silt_top, clay_top, color='#7a5c48', label='Clay')
+    axs[1].plot(sand_top, depths, '-k', linewidth=0.5)
+    axs[1].plot(silt_top, depths, '-k', linewidth=0.5)
+    axs[1].set_xlim(0, 100)
+    axs[1].set_xlabel('%')
+    axs[1].legend(loc='lower right')
+
+    # (2) sorting (Folk & Ward inclusive graphic standard deviation, phi)
+    axs[2].plot(sorting, depths, '-ok', linewidth=1, markersize=3)
+    axs[2].set_xlabel('Sorting, σ$_I$ [φ]')
+    axs[2].grid(alpha=0.4)
+
+    # (3) kurtosis (Folk & Ward graphic kurtosis, K_G)
+    axs[3].plot(kurtosis, depths, '-ok', linewidth=1, markersize=3)
+    axs[3].axvline(1.0, color='r', linestyle='--', linewidth=0.8, label='Mesokurtic')
+    axs[3].set_xlabel('Kurtosis, K$_G$')
+    axs[3].legend()
+    axs[3].grid(alpha=0.4)
+
+    axs[0].invert_yaxis()            # shared y: inverts all four panels
+    fig.tight_layout()
     plt.show()
-    
-    return None
+
+    return {"names": names, "depths": depths, "means": means, "d10": d10,
+            "d50": d50, "d90": d90, "sand": sand, "silt": silt, "clay": clay,
+            "sorting": sorting, "kurtosis": kurtosis}
+
